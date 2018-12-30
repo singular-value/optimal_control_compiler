@@ -42,6 +42,14 @@ class custQGate:
 
         return True
 
+    def __copy__(self):
+
+        copy_qgate_list = []
+        for gq in self.gate_list:
+            copy_qgate_list.append(gq.__copy__())
+
+        return custQGate(copy_qgate_list)
+
     def __hash__(self):
 
         return id(self)

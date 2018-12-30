@@ -43,6 +43,10 @@ class QCirc(object):
         self.critical_paths = []
         self.paths = defaultdict(lambda : [])
 
+        self.pred_set = defaultdict(lambda : [])
+        self.suc_set = defaultdict(lambda : [])
+        self.com_set = defaultdict(lambda : [])
+
         if mapped:
             for wire in self.wires:
                 re_bit = re.compile('qubit_(\d)_(\d_').search(wire)
@@ -227,16 +231,33 @@ class QCirc(object):
                         if next_node not in node1.suc[wire]:
                             node1.add_suc(wire, next_node)
                             next_node.add_pred(wire, node1)
+            
 
+        for c_gate in self.op_tab:
+            self.suc_set[c_gate] = []
+            self.pred_set[c_gate] = []
+            for wire in c_gate.wires:
+                for c_suc in c_gate.suc[wire]:
+                    if c_suc not in self.suc_set[c_gate]:
+                        self.suc_set[c_gate].append(c_suc)
+
+                for c_pred in c_gate.pred[wire]:
+                    if c_pred not in self.pred_set[c_gate]:
+                        self.pred_set[c_gate].append(c_pred)
+
+        self.suc_set[c_gate] = list(set(self.suc_set[c_gate]))
+        self.pred_set[c_gate] = list(set(self.pred_set[c_gate]))
+    
+        self.com_set[c_gate] = self.gate_commutation_set(c_gate)
         return
 
     def gate_commutation_set(self, gate):
-
         """
         - Return the gates that commute with a gate
         """
 
         # pylint: disable=too-many-nested-blocks
+
 
         rt_set = []
 
@@ -259,6 +280,7 @@ class QCirc(object):
             c_set = self.commutation_set[wire][c_set_ind]
 
             for gate_n in c_set:
+
                 if self.op_tab.index(gate_n) != self.op_tab.index(gate):
                     if len(gate_n.wires) == 1:
 
@@ -290,7 +312,7 @@ class QCirc(object):
         - This function implements the merge condition
         """
 
-        if cgate1 == cgate2:
+        if cgate1 is cgate2:
 
             return False
 
@@ -313,6 +335,30 @@ class QCirc(object):
 
         return rt_val
 
+    def _can_merge_list(self, cgate_list):
+
+        for c_gate in cgate_list:
+            
+            c_gate_cannot_merge = True
+            for wire in c_gate.wires:
+                for c_suc in c_gate.suc[wire]:
+                    if c_suc in cgate_list:
+                        c_gate_cannot_merge = False
+
+                for c_pred in c_gate.pred[wire]:
+                    if c_pred in cgate_list:
+                        c_gate_cannot_merge = False
+
+                for n_gate in self.commutation_set[wire][self.commutation_set[(c_gate,wire)]]:
+
+                    if n_gate != c_gate and n_gate in cgate_list:
+                        c_gate_cannot_merge = False
+
+            for qg in c_gate.gate_list:
+                if qg.name == "H" or qg.name == "Tdag" or qg.name == "T" or qg.name == "S": # Disable for debugging square-root
+                    return False
+        return not c_gate_cannot_merge
+        
     def merge_gate(self, cgate1, cgate2, op_tab=None, qb_tab=None, commutation_set=None):
         """
         - Merge two customized gates.
@@ -328,10 +374,9 @@ class QCirc(object):
         # pylint: disable=too-many-statements
         # pylint: disable=too-many-nested-blocks
 
-        
-
         if not self._can_merge(cgate1, cgate2):
             return cgate1
+        
 
         c_pred, c_suc = cgate1, cgate2
 
@@ -370,11 +415,11 @@ class QCirc(object):
         # Insert the new cgate, keep the op_tab more or less unchanged
 
         c_pred_op_tab_ind = self.op_tab.index(c_pred)
-
+        
         self.op_tab.remove(c_pred)
         self.op_tab.remove(c_suc)
         self.op_tab.insert(c_pred_op_tab_ind, rt_gate)
-
+        
         # - Handle the pred-suc relations between the new gate and old preds and sucs.
         # - For each wire, there are 4 (orthogonal) situations need to be handled:
         #   1. c_pred commutes with c_suc / c_pred doesn't commute with c_suc
@@ -383,22 +428,29 @@ class QCirc(object):
         #   4. c_pred in a commutation set, c_suc alone(or vice versa) / both alone / both in c. set
         # - So there are 2x2x2x3 = 24 cases in total
         # - The following codes try to be as condensed as possible
-
+    
         for wire in wire_set:
 
             if wire in c_pred.wires:
 
                 c_pred_com_ind = self.commutation_set[(c_pred, wire)]
                 c_pred_qb_ind = self.qb_tab[wire].index(c_pred)
-
+                
                 self.commutation_set[wire][c_pred_com_ind].remove(c_pred)
                 self.qb_tab[wire].remove(c_pred)
 
                 for c_pred_pred in c_pred.pred[wire]:
+                    print "c_pred_pred", c_pred_pred.gate_list[0].name
                     c_pred_pred.remove_suc(wire, c_pred)
 
+                    if c_pred in self.suc_set[c_pred_pred]:
+                        self.suc_set[c_pred_pred].remove(c_pred)
+
                 for c_pred_suc in c_pred.suc[wire]:
+
                     c_pred_suc.remove_pred(wire, c_pred)
+                    if c_pred in self.pred_set[c_pred_suc]:
+                        self.pred_set[c_pred_suc].remove(c_pred)
 
                 rt_gate_pred_set = c_pred.pred[wire]
 
@@ -416,9 +468,13 @@ class QCirc(object):
 
                 for c_suc_pred in c_suc.pred[wire]:
                     c_suc_pred.remove_suc(wire, c_suc)
+                    if c_suc in self.suc_set[c_suc_pred]:
+                        self.suc_set[c_suc_pred].remove(c_suc)
 
                 for c_suc_suc in c_suc.suc[wire]:
                     c_suc_suc.remove_pred(wire, c_suc)
+                    if c_suc in self.pred_set[c_suc_suc]:
+                        self.pred_set[c_suc_suc].remove(c_suc)
 
                 if wire not in c_pred.wires:
                     rt_gate_pred_set = c_suc.pred[wire]
@@ -463,18 +519,36 @@ class QCirc(object):
                                  len(self.commutation_set[wire])):
                     for cg_comm in self.commutation_set[wire][ind]:
                         self.commutation_set[(cg_comm, wire)] += 1
+            
 
             for rt_pred in rt_gate_pred_set:
                 rt_pred.add_suc(wire, rt_gate)
                 rt_gate.add_pred(wire, rt_pred)
+                if rt_gate not in self.suc_set[rt_pred]:
+                    self.suc_set[rt_pred].append(rt_gate)
+                if rt_pred not in self.pred_set[rt_gate]:
+                    self.pred_set[rt_gate].append(rt_pred)
 
             for rt_suc in rt_gate_suc_set:
                 rt_suc.add_pred(wire, rt_gate)
                 rt_gate.add_suc(wire, rt_suc)
+                if rt_gate not in self.pred_set[rt_suc]:
+                    self.pred_set[rt_suc].append(rt_gate)
+                if rt_suc not in self.suc_set[rt_gate]:
+                    self.suc_set[rt_gate].append(rt_suc)
 
             self.commutation_set[wire][rt_gate_commutation_ind].append(rt_gate)
             self.commutation_set[(rt_gate, wire)] = rt_gate_commutation_ind
             self.qb_tab[wire].insert(rt_gate_qb_ind, rt_gate)
+        
+        self.com_set[rt_gate] = self.gate_commutation_set(rt_gate)
+        
+        for wire in rt_gate.wires:
+            rt_com_ind = self.commutation_set[(rt_gate, wire)]
+            for cc_gate in self.commutation_set[wire][rt_com_ind]:
+                self.com_set[cc_gate] = self.gate_commutation_set(cc_gate)
+
+        rt_gate.et = c_pred.et
 
         return rt_gate
 
@@ -484,7 +558,8 @@ class QCirc(object):
         - For commutation-aware scheduling
         """
         # pylint: disable=too-many-branches
-
+        
+        print "OP_tab_before_d_merge", len(self.op_tab)
         circ_merge_set = []
 
         m_mask = defaultdict(lambda: False)
@@ -546,7 +621,6 @@ class QCirc(object):
 
                 mset_pass = True
                 for gate_to_merge in m_set:
-                    
                     for qg_to_merge in gate_to_merge.gate_list:
 
                         q_gate_to_merge = QGate(qg_to_merge.name,
@@ -563,11 +637,14 @@ class QCirc(object):
 
                 if is_diagonal(temp_qc.unitary()) and len(m_set) >= max_int:
 
+                    if not self._can_merge_list(m_set):
+                       continue
+
                     if len(m_set) > max_int:
                         rt_set = m_set
 
                         max_int = len(m_set)
-
+                
             if len(rt_set) >= 2:
             
                 for rt_set_gate in rt_set:
@@ -582,11 +659,63 @@ class QCirc(object):
 
             count = 0 
             
-            while len(rt_set) != 0 and count <= len(rt_set) + 1:
-            # while len(rt_set) != 0:
+            # while len(rt_set) != 0 and count < len(rt_set) + 1:
+            while len(rt_set) != 0:
                 if self._can_merge(merged_gate, rt_set[0]):
+                    print "Before diag merge"
+                    print "merge gate before ind", self.op_tab.index(merged_gate)
+                    for qg in merged_gate.gate_list:
+                        print qg.name, qg.wires
+
+                    print "his pred and suc"
+                    for cc in self.pred_set[merged_gate]:
+                        print "pred", self.op_tab.index(cc)
+                        for qg in cc.gate_list:
+                            print qg.name, qg.wires
+
+                    for cc in self.suc_set[merged_gate]:
+
+                        print "suc", self.op_tab.index(cc)
+                        for qg in cc.gate_list:
+                            print qg.name, qg.wires
+
+                        
+                    print "Before diag merge"
+                    print "rt_set before ind", self.op_tab.index(rt_set[0])
+                    for qg in rt_set[0].gate_list:
+                        print qg.name, qg.wires
+
+                    print "his pred and suc"
+                    for cc in self.pred_set[rt_set[0]]:
+                        print "pred", self.op_tab.index(cc)
+                        for qg in cc.gate_list:
+                            print qg.name, qg.wires
+
+                    for cc in self.suc_set[rt_set[0]]:
+
+                        print "suc", self.op_tab.index(cc)
+                        for qg in cc.gate_list:
+                            print qg.name, qg.wires
+
 
                     merged_gate = self.merge_gate(merged_gate, rt_set[0])
+
+                    print "After diag merge"
+                    print "merge gate before ind", self.op_tab.index(merged_gate)
+                    for qg in merged_gate.gate_list:
+                        print qg.name, qg.wires
+
+                    print "his pred and suc"
+                    for cc in self.pred_set[merged_gate]:
+                        print "pred", self.op_tab.index(cc)
+                        for qg in cc.gate_list:
+                            print qg.name, qg.wires
+
+                    for cc in self.suc_set[merged_gate]:
+
+                        print "suc", self.op_tab.index(cc)
+                        for qg in cc.gate_list:
+                            print qg.name, qg.wires
 
                     rt_set.pop(0)
                     count = 0
@@ -595,6 +724,7 @@ class QCirc(object):
                     count += 1
                     rt_set.append(rt_set.pop(0))
 
+        print "OP_tab_after_d_merge", len(self.op_tab)
         return
 
     def _old_diagonal_merge_suc(self, gate, current_merge_set):
@@ -700,7 +830,6 @@ class QCirc(object):
                 rt_set.append(m_set + c_set)
 
         return rt_set
-
 
     def _diagonal_merge_suc(self, gate, current_merge_set):
         """
@@ -827,15 +956,25 @@ class QCirc(object):
         current_com_set = {}
         current_timepoint = [0.0] * len(self.wires)
         com_set = {}
+        
+        # replaced copy.copy for debugging
         for key in self.commutation_set.keys():
-            com_set[key] = copy.copy(self.commutation_set[key])
+            if isinstance(self.commutation_set[key], int):
+                com_set[key] = self.commutation_set[key]
+            else: 
+                com_set[key] = []
+                for term in self.commutation_set[key]:
+                    com_set[key].append([])
+                    for in_term in term:
+                        com_set[key][-1].append(in_term)
+
         com_set_empty = False
         self.execution_time = {}
         
         for wire in self.wires:
-                 
-            current_com_set[wire] = com_set[wire].pop(0)
-        
+            # Have to use copy here!
+            current_com_set[wire] = copy.copy(com_set[wire].pop(0))
+
         current_gate_set = []
         for wire in self.wires:
             for c_gate in current_com_set[wire]:
@@ -854,20 +993,21 @@ class QCirc(object):
 
                     if c_gate_is_current:
                         current_gate_set.append(c_gate)
-        
+        counter = 0
+
         while not com_set_empty or not len(current_gate_set) == 0:
-            
+
+            counter +=1 
             next_gate_ind = 0
             next_gate_set = []    
 
             while len(next_gate_set) == 0:
-
+                
                 next_et = sorted(current_timepoint)[next_gate_ind]
                 next_wire_set = [wire for wire_id, wire in enumerate(self.wires) 
-                             if current_timepoint[wire_id] <= next_et]
-
+                                 if current_timepoint[wire_id] <= next_et]
+                
                 for c_gate in current_gate_set:
-                    
                     if c_gate in next_gate_set:
                         continue 
 
@@ -882,30 +1022,34 @@ class QCirc(object):
                 next_gate_ind += 1
         
             schedule_set = max_matching(next_gate_set)
-
-            scheduled.append(c_gate)
-            c_gate.et = next_et
-            self.execution_time[c_gate] = next_et
-            current_gate_set.remove(c_gate)
             
-            for wire in c_gate.wires:
+            for c_gate in schedule_set:
 
-                cw_id = self.wires.index(wire)
-                current_com_set[wire].remove(c_gate)
-                current_timepoint[cw_id] = c_gate.duration() + c_gate.et
+                c_gate.et = next_et
+                scheduled.append((c_gate, c_gate.et))
+                self.execution_time[c_gate] = next_et
+                current_gate_set.remove(c_gate)
+                next_gate_set.remove(c_gate)
+            
+                for wire in c_gate.wires:
 
+                    cw_id = self.wires.index(wire)
+                    current_com_set[wire].remove(c_gate)
+                    current_timepoint[cw_id] = c_gate.duration() + c_gate.et
+            
             for wire in self.wires:
+
                 if (len(current_com_set[wire]) == 0
                     and len(com_set[wire]) != 0):
             
-                    current_com_set[wire] = com_set[wire].pop(0)
+                    current_com_set[wire] = copy.copy(com_set[wire].pop(0))
 
                 for c_gate in current_com_set[wire]:
 
                     if c_gate in current_gate_set:
                         continue
 
-                    elif len(c_gate.wires) == 1:
+                    if len(c_gate.wires) == 1:
                         current_gate_set.append(c_gate)
 
                     else: 
@@ -914,14 +1058,14 @@ class QCirc(object):
                             if c_gate not in current_com_set[c_wire]:
                                 c_gate_is_current = False
 
+
                         if c_gate_is_current:
                             current_gate_set.append(c_gate)
-            
+                
             com_set_empty = True
             for wire in self.wires:
                 if len(com_set[wire]) > 0:
                     com_set_empty = False
-
 
         # Update the critical path
         sorted_gate_list = sorted(self.execution_time.items(), key = lambda t: t[0].duration() + t[1])
@@ -938,18 +1082,41 @@ class QCirc(object):
         for c_gate in self.op_tab:
             self._find_critical_paths(c_gate, target_gate=c_gate)
 
+        for c_gate in self.op_tab:
+            for wire in c_gate.wires:
+                for c_suc in c_gate.suc[wire]:
+                    if c_suc not in self.suc_set[c_gate]:
+                        self.suc_set[c_gate].append(c_suc)
+
+                for c_pred in c_gate.pred[wire]:
+                    if c_pred not in self.pred_set[c_gate]:
+                        self.pred_set[c_gate].append(c_pred)
+
+        self.suc_set[c_gate] = list(set(self.suc_set[c_gate]))
+        self.pred_set[c_gate] = list(set(self.pred_set[c_gate]))
+    
+        self.com_set[c_gate] = self.gate_commutation_set(c_gate)
+
         if filename != None:
             with open(filename, "w") as f_handler:
                 for wire in self.wires:
                     f_handler.write("qubit {}\n".format(wire))
-                for c_gate in scheduled:
+                for c_gate, gate_time in scheduled:
                     for q_gate in c_gate.gate_list:
+                        # if q_gate.name in ("Rz", "Rx", "Ry"):
+                        #     f_handler.write("{} {} {}\n".format(q_gate.name,
+                        #                                         q_gate.rot,
+                        #                                         ",".join(q_gate.wires)))
+                        # else:
+                        #     f_handler.write("{} {}\n".format(q_gate.name,
+                        #                                      ",".join(q_gate.wires)))
+
                         if q_gate.name in ("Rz", "Rx", "Ry"):
-                            f_handler.write("{} {} {}\n".format(q_gate.name,
+                            f_handler.write("{} {} {} {}\n".format(gate_time, q_gate.name,
                                                                 q_gate.rot,
                                                                 ",".join(q_gate.wires)))
                         else:
-                            f_handler.write("{} {}\n".format(q_gate.name,
+                            f_handler.write("{} {} {}\n".format(gate_time, q_gate.name,
                                                              ",".join(q_gate.wires)))
 
         return scheduled
@@ -986,10 +1153,12 @@ class QCirc(object):
         """
         - Generate the final n-qubit blocks
         """
-        
+
         c_merge_set = {} 
 
         in_merge_set = defaultdict(lambda: [])
+        unmerged_gates = []
+
 
         for c_gate in self.op_tab:
             
@@ -1000,40 +1169,141 @@ class QCirc(object):
          
         for c_gate in self.op_tab:
 
-            if len(c_merge_set[c_gate]) != 0:
-                unmerged_set.append(c_gate)
+            if len(c_merge_set[c_gate]) > 1:
+                unmerged_gates.append(c_gate)
 
         while len(unmerged_gates) != 0:
 
-            c_gate = max([ind for ind, cg in enumerate(unmerged_gates)],
-                         key = lambda ix: len(c_merge_set[unmerged_gates[ix]]))
+            print "unmerged_gates", len(unmerged_gates)
+            for cc_gate in unmerged_gates:
+                print "C gate"
+
+                for qg in cc_gate.gate_list:
+                    print qg.name, qg.wires
             
+            c_gate = max(unmerged_gates,
+                         key = lambda cg: len(c_merge_set[cg]))
+            
+            while c_gate not in self.op_tab:
+                unmerged_gates.remove(c_gate)
+                c_gate = max(unmerged_gates,
+                             key = lambda cg: len(c_merge_set[cg]))
+
+            c_merge_set[c_gate] = self._max_merge_set([c_gate], wire_width)
             gates_to_update = []
             unmerged_gates.remove(c_gate)
-            
+            c_merge_set[c_gate].remove(c_gate)
+
             merged_gate = c_gate
             for g_to_u in in_merge_set[merged_gate]:
                 if g_to_u != c_gate:
                     gates_to_update.append(g_to_u)
 
-            while len(c_merge_set) != 0:
-                if self._can_merge(merged_gate, c_merge_set[0]):
+            print "I am in c_gate", c_gate.gate_list[0].name, c_gate.gate_list[0].wires, self.op_tab.index(c_gate)
+            print "c_merge_set len", len(c_merge_set[c_gate])
+            for cc_gate in c_merge_set[c_gate]:
+                print "C gate", 
+                for qg in cc_gate.gate_list:
+                    print qg.name, qg.wires
+            
+            counter = 0
 
-                    merged_gate = self.merge_gate(merged_gate, c_merge_set[0])
-                    gate_removed = c_merge_set.pop(0)
+            while len(c_merge_set[c_gate]) != 0:
 
-                    in_merge_set[gate_removed].remove(c_gate)
+                print "OP_tab", len(self.op_tab)
+                print "##########"
+                counter += 1
+                if counter > 1000:
+                    break
+                print "counter", counter
+
+                print "Before merge"
+                print "merge gate before ind", self.op_tab.index(merged_gate)
+                for qg in merged_gate.gate_list:
+                    print qg.name, qg.wires
+
+                print "his pred and suc"
+                for cc in self.pred_set[merged_gate]:
+                    print "pred", self.op_tab.index(cc)
+                    for qg in cc.gate_list:
+                        print qg.name, qg.wires
+
+                for cc in self.suc_set[merged_gate]:
+
+                    print "suc", self.op_tab.index(cc)
+                    for qg in cc.gate_list:
+                        print qg.name, qg.wires
+                
+                if c_merge_set[c_gate][0] not in self.op_tab:
+                    # c_merge_set[c_gate] = self._max_merge_set([c_gate], wire_width)
+                    c_merge_set[c_gate].pop(0)
+                    break
+                print "first gate in cmerge[cgate] ind", self.op_tab.index(c_merge_set[c_gate][0])
+
+                for qg in c_merge_set[c_gate][0].gate_list:
+                    print qg.name, qg.wires
+
+                print "his pred"
+                for cc in self.pred_set[c_merge_set[c_gate][0]]:
+                    print "pred", self.op_tab.index(cc)
+                    for qg in cc.gate_list:
+                        print qg.name, qg.wires
+
+                print "his suc"
+                for cc in self.suc_set[c_merge_set[c_gate][0]]:
+                    print "suc", self.op_tab.index(cc)
+                    for qg in cc.gate_list:
+                        print qg.name, qg.wires
+
+                if self._can_merge(merged_gate, c_merge_set[c_gate][0]):
+                    
+                    merged_gate = self.merge_gate(merged_gate, c_merge_set[c_gate][0])
+                    print "Merged_gate index", self.op_tab.index(merged_gate)
+
+                    gate_removed = c_merge_set[c_gate].pop(0)
+                    print "Gate I think I removed"
+
+                    print "___OPTAB len", len(self.op_tab)
+                    
+                    if c_gate in in_merge_set[gate_removed]:
+                        in_merge_set[gate_removed].remove(c_gate)
+
                     gates_to_update += in_merge_set[gate_removed]
-                    in_merge_set[gate_removed] = []
                     gates_to_update = list(set(gates_to_update))
+                    
+                    if gate_removed in unmerged_gates:
+                        print "Now I am removing", gate_removed.gate_list[0].name, gate_removed.wires, "from unmerged"
+                        unmerged_gates.remove(gate_removed)
+                    
 
+                    print "now check neighbors and sucs and preds"
+
+                    for ccc in self.op_tab:
+                        print "ccc", ccc
+                        print "sucs"
+                        for wire in ccc.wires:
+                            print "wire", wire
+                            for suc_ccc in ccc.suc[wire]:
+                                print "suc", suc_ccc
+                                for qg in suc_ccc.gate_list:
+                                    print qg.name, qg.wires
+                                print "suc_ind", self.op_tab.index(suc_ccc)
+                    
+                        print "preds"
+
+                        for pred_ccc in self.pred_set[ccc]:
+                            print "pred"
+                            for qg in pred_ccc.gate_list:
+                                print qg.name, qg.wires
+                            print "suc_ind", self.op_tab.index(pred_ccc)
+                            
                 else:
-
-                    c_merge_set.append(c_merge_set.pop(0))
+                    print "Nothing happened"
+                    c_merge_set[c_gate].append(c_merge_set[c_gate].pop(0))
 
             c_merge_set[merged_gate] = self._max_merge_set([merged_gate], wire_width)
 
-            if len(c_merge_set[merged_gate]) != 0:
+            if len(c_merge_set[merged_gate]) != 1:
                 unmerged_gates.append(merged_gate)
 
             for g_to_u in gates_to_update:
@@ -1046,82 +1316,105 @@ class QCirc(object):
         """
         - Return the max merge set of a gate, given a wire width limit
         """
+        
+        c_merge_set = self._find_merge_set(c_gate_list, wire_width)
+        if len(c_merge_set) == len(c_gate_list):
+            return c_merge_set
+        
+        wire_set = []
+        for c_gate in c_merge_set:
+            wire_set += c_gate.wires
+        
+        wire_set = list(set(wire_set))
+        if len(wire_set) > wire_width:
+            return c_gate_list
+
+        else:
+            return self._find_merge_set(c_merge_set, wire_width)
+
+    def _find_merge_set(self, c_gate_list, wire_width):
+        """
+        - Find the max merge set of a gate list, 
+        - withouting having to merging them
+        """
         rt_set = []
 
-        c_merge_set = self._find_merge_set(c_gate_list)
-
-        for merge_gate in c_merge_set:
-            
-            merge_gate_set = self._find_merge_set(c_gate_list + [merge_gate])
-
-
-    def _find_merge_set(self, c_gate_list):
-    
-        rt_set = []
         for c_gate in c_gate_list:
             
-            rt_set = list(set(self._find_gate_merge_set(c_gate))
-                       & set(c_gate_list)
-                       & set(rt_set))
+            rt_set = list(set(self._find_gate_merge_set(c_gate, wire_width))
+                       | set(c_gate_list)
+                       | set(rt_set))
 
         return rt_set
 
-    def _find_gate_merge_set(self, c_gate):
+    def _find_gate_merge_set(self, c_gate, wire_width):
         """
-        - Find the set of gates can be merged with c_gate
+        - Find the set of gates can be merged with c_gate,
+          and not compromising critical path
         """
 
-        c_com_set = self.gate_commutation_set(cgate)
         c_merge_set = []
-        
-        c_pred_set = []
-        c_suc_set =[]
+        for gate_to_merge in list(set(self.pred_set[c_gate]) | set(self.com_set[c_gate])):
 
-        for wire in c_gate.wires:
-
-            c_pred_set += c_gate.pred[wire]
-            c_suc_set += c_gate.pred[wire]
-
-        c_pred_set = set(c_pred_set)
-        c_suc_set = set(c_suc_set)
-
-        for gate_to_merge in c_pred_set:
-            
-            gate_to_merge_pass = True
-            for check_gate in list(set(c_pred_set + c_com_set)):
+            gate_to_merge_pass =True
+            for check_gate in list(set(self.pred_set[c_gate]) |  set(self.com_set[c_gate])):
                 if (check_gate.et + check_gate.duration()
-                    > gate_to_merge.et):
+                    > gate_to_merge.et
+                    and 
+                    check_gate != gate_to_merge):
+
                     gate_to_merge_pass = False
+                    break
+            
+            if not gate_to_merge_pass:
+                continue
+
+            for check_gate in list(set(self.suc_set[gate_to_merge]) | set(self.com_set[gate_to_merge])):
+                if (check_gate.et < c_gate.duration() + c_gate.et
+                    and 
+                    check_gate != c_gate):
+
+                    gate_to_merge_pass = False
+                    break
 
             if not gate_to_merge_pass:
                 continue
 
-        for gate_to_merge in c_suc_set:
+            if gate_to_merge not in c_merge_set:
+                c_merge_set.append(gate_to_merge)
 
-            gate_to_merge_pass = True
-            for check_gate in list(set(c_suc_set + c_com_set)):
+        for gate_to_merge in list(set(self.suc_set[c_gate]) | set(self.com_set[c_gate])):
+            gate_to_merge_pass =True
+            for check_gate in self.pred_set[gate_to_merge] + self.com_set[gate_to_merge]:
                 if (check_gate.et + check_gate.duration()
-                    > 
-        
-        for gate_to_merge in list(set(c_com_set
-                                      + c_pred_set
-                                      + c_suc_set)):
+                    > c_gate.et
+                    and 
+                    check_gate != c_gate):
 
-            if (self._can_merge(c_gate, gate_to_merge)
-                and
-                (set(self.paths[c_gate]) - set(self.paths[gate_to_merge])
-                 <= set([c_gate, gate_to_merge]))
-                and 
-                (set(self.paths[gate_to_merge]) - set(self.paths[c_gate])
-                 <= set([c_gate, gate_to_merge]))):
+                    gate_to_merge_pass = False
+                    break
+            
+            if not gate_to_merge_pass:
+                continue
 
+            for check_gate in list(set(self.suc_set[c_gate]) |set( self.com_set[c_gate])):
+                if (check_gate.et > gate_to_merge.duration() + gate_to_merge.et
+                    and 
+                    check_gate != c_gate):
+
+                    gate_to_merge_pass = False
+                    break
+
+            if not gate_to_merge_pass:
+                continue
+            
+            if gate_to_merge not in c_merge_set:
                 c_merge_set.append(gate_to_merge)
 
         return c_merge_set
 
-
     ########################################
-    #    - This seems not promising
+    #    - This approach seems not promising
     #    - Save it here in case needed in the future
 
     #    - Bound the execution time of a gate by analyzing the commutation sets
@@ -1194,7 +1487,6 @@ class QCirc(object):
     def total_length(self):
 
         return sorted(self.execution_time.items(), key = lambda t: t[0].duration() + t[1])[-1][1]
-
 
 ###########################
 # Global helper functions

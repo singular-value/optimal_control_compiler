@@ -20,6 +20,12 @@ class QGate():
             self.suc[wire] = []
             self.pred[wire] = []
 
+    def __copy__(self):
+
+        n_qg = QGate(self.name, self.wires, rot=self.rot)
+
+        return n_qg
+
     def unitary(self):
         return _self.matrix
 
